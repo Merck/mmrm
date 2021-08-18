@@ -1,0 +1,249 @@
+---
+title: "lmer problem"
+author: "Siyi Liu"
+date: "6/3/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(reshape2)
+library(nlme)
+library(mvtnorm)
+library(e1071)
+library(knitr)
+library(car)
+library(lme4)
+library(Matrix)
+library(magic)
+```
+
+## Generating data
+
+```{r }
+## Generate data ----
+sim_one_group <- function(n, k, P, sigma, beta, pi = NULL, pi_par = NULL, trt = 1, missing_type, distribution){
+  p <- P
+  n_pattern <- length(pi)
+  covar_x <- cbind(rnorm(n), rbinom(n, 1, 0.3))
+  colnames(covar_x) <- paste0("x",1:k)
+  xmat <- cbind(rep(1,n),covar_x)
+  y_mat <- matrix(0, n, p)
+  if(distribution == "MVN")
+    eps <- rmvnorm(n, mean = rep(0,p), sigma = sigma)
+  else if(distribution == "MVT")
+    # eps <- rmvt(n, delta = rep(0,p), sigma = sigma, df = 3)
+    eps <- rmvt(n, delta = rep(0,p), sigma = sigma/3, df = 3)
+  else if(distribution == "MVGamma"){
+    u <- rmvnorm(n, mean = rep(0,p), sigma = cov2cor(sigma))
+    eps <- qgamma(pnorm(u), shape = 2, scale = 2) - 4
+  }
+  y_mean <- apply(beta, 1, function(x) as.vector(xmat%*%x))
+  y_mat <- y_mean + eps
+  mean_y <- colMeans(y_mat)
+  cov_eps <- cov(eps)
+  cov_y <- cov(y_mat)
+  db <- data.frame(y_mat)
+  colnames(db) <- paste0("y",1:p)
+  db <- cbind(db, covar_x)
+  db$num <- c(1:n)
+  db$id <- paste0(trt, "-", 1:n)
+  
+  if(missing_type == "MCAR"){
+    db$pattern <- sample(1:p, size = n, replace = TRUE, prob = pi)
+  }
+  
+  if(missing_type %in% c("MAR","MNAR")){
+    if(pi_par[3] != 0 & missing_type == "MAR"){
+      stop("This is not a MAR setting")
+    }
+    logit_inv <- function(x){
+      exp(x) / (1 + exp(x))
+    }
+    
+    .pattern <- rep(1, n)
+    for(i_missing in p:2){
+      .score <- as.matrix(data.frame(1, db[,c(i_missing - 1,i_missing)])) %*% pi_par
+      .pi <- logit_inv(as.numeric(.score))
+      .pattern <- ifelse( rbinom(n = n, size = 1, prob = .pi) == 1, i_missing, .pattern)
+    }
+    db$pattern <- .pattern
+    
+  }
+  
+  db_comb <- db
+  db_comb$trt <- trt
+  
+  for(i in 1:nrow(db_comb)){
+    for(j in 2:p){
+      if(db_comb$pattern[i] <= j & db_comb$pattern[i] > 1){
+        db_comb[i, j] <- NA
+      }
+    }
+  }
+  
+  db_long <- melt(db_comb, id.vars = c("id","pattern", "num", paste0("x", 1:k), "trt"),
+                  variable.name = c("time") , value.name = "aval")
+  db_long <- db_long %>% group_by(id) %>%
+    mutate(
+      time = as.numeric(time),
+      trt = trt) %>%
+    ungroup()
+  
+  return(list(db_comb = db_comb, db_long = db_long, 
+              mean_y = mean_y, cov_eps = cov_eps, cov_y = cov_y))
+}
+## Data ----
+N <- 100
+k <- 2 # dimension of covariates (omit intercept)
+p <- 5 # number of visits
+mu_beta_ctl <- c(0, 1, 2, 3, 4)
+mu_beta_trt <- c(0, 1.3, 2.8, 4, 5.5)
+set.seed(123)
+beta_ctl <- rbind(rnorm(k+1, mu_beta_ctl[1], 1), rnorm(k+1,mu_beta_ctl[2], 1), 
+                  rnorm(k+1, mu_beta_ctl[3], 1), rnorm(k+1,mu_beta_ctl[4], 1), 
+                  rnorm(k+1, mu_beta_ctl[5], 1))
+beta_trt <- rbind(rnorm(k+1, mu_beta_trt[1], 1), rnorm(k+1,mu_beta_trt[2], 1), 
+                  rnorm(k+1, mu_beta_trt[3], 1), rnorm(k+1,mu_beta_trt[4], 1), 
+                  rnorm(k+1, mu_beta_trt[5], 1))
+beta_trt[1,] <- beta_ctl[1,]
+
+sd  <- c(2.0, 1.8, 2.0, 2.1, 2.2)
+corr   <- matrix(
+  c(1, 0.6, 0.3, 0.2, 0.1,
+    0.6, 1, 0.7, 0.5, 0.2,
+    0.3, 0.7, 1, 0.6, 0.4,
+    0.2, 0.5, 0.6, 1, 0.5,
+    0.1, 0.2, 0.4, 0.5, 1), 5, 5)
+Sigma <- diag(sd) %*% corr %*% diag(sd)
+
+missing_type = "MAR"
+phi_ctl <- c(-3.5, 0.2, 0)
+phi_trt <- c(-3.6, 0.2, 0)
+
+distribution = "MVN"
+
+set.seed(1234)
+tmp1 <- sim_one_group(n = N, k = k, P = p, sigma = Sigma, beta = beta_ctl, pi_par = phi_ctl, trt = 1, missing_type = missing_type, distribution = distribution)
+tmp2 <- sim_one_group(n = N, k = k, P = p, sigma = Sigma, beta = beta_trt, pi_par = phi_trt, trt = 2, missing_type = missing_type, distribution = distribution)
+
+db_comb <- rbind(tmp1[[1]], tmp2[[1]])
+db_long <- rbind(tmp1[[2]], tmp2[[2]])
+```
+
+```{r}
+robust.cov <- function(u){
+  form <-  formula(u)
+  mf <- model.frame(form,getData(u))
+  Xmat <- model.matrix(form,mf)
+  ids <- unique(u$groups)
+  m <- length(ids)
+  Vlist <-  as.list(ids)
+  for (i in 1:m){
+    Vlist[[i]] <- getVarCov(u,individual=ids[i],type="marginal")
+  }
+  V <- Reduce(adiag,Vlist)
+  Vinv <- solve(V)
+  Sig.model <- solve(t(Xmat)%*%Vinv%*%Xmat)
+  resid <- diag(residuals(u,type="response"))
+  ones.list <- lapply(Vlist,FUN=function(u){matrix(1,nrow(u),ncol(u))})
+  Ones <- Reduce(adiag,ones.list)
+  meat <- t(Xmat)%*%Vinv%*%resid%*%Ones%*%resid%*%Vinv%*%Xmat
+  Sig.robust <- Sig.model%*%meat%*%Sig.model
+  se.robust <- sqrt(diag(Sig.robust))
+  se.model <- sqrt(diag(Sig.model))
+  return(list(Sig.model=Sig.model,se.model=se.model,Sig.robust=Sig.robust,se.robust=se.robust))
+}
+```
+
+
+## Using lmer()
+
+Fit a model for the control group with $y \sim x + \text{factor(time)} + x\text{factor(time)}$.
+
+```{r }
+db_long <- db_long[order(db_long$id),]
+db_avaiable <- na.omit(db_long)
+db_avaiable_ctl <- db_avaiable[which(db_avaiable$trt == 1),]
+db_avaiable_trt <- db_avaiable[which(db_avaiable$trt == 2),]
+trt_ind <- factor(db_avaiable$trt)
+child_ctl <- factor(db_avaiable_ctl$id)
+week_ctl <- factor(db_avaiable_ctl$time)
+time_factor <- as.numeric(week_ctl)
+# (1) with interaction of covariate
+fit_lmer_ctl <- lmer(aval ~ x1 + x2 + week_ctl + x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore"),
+                     data = db_avaiable_ctl)
+```
+
+
+```{r}
+
+# regression coefficients (for fixed effect)
+coef_lmer <- fixef(fit_lmer_ctl)
+cov_beta_lmer <- vcov(fit_lmer_ctl, full = TRUE, ranpar = "var")
+sebeta_lmer <- sqrt(diag(cov_beta_lmer))
+
+# Compare with gls
+fit_gls_ctl <- gls(aval ~ x1 + x2 + week_ctl + x1:week_ctl + x2:week_ctl,
+                   correlation=corSymm(form = ~ time_factor | child_ctl),
+                   weights = varIdent(form = ~ 1 | week_ctl),
+                   data = db_avaiable_ctl)
+coef_gls <- coef(fit_gls_ctl)
+cov_res_gls <- robust.cov(fit_gls_ctl)
+sebeta <- cov_res_gls$se.model
+print("Fixed effect coefficients for lmer()")
+coef_lmer
+sebeta_lmer
+print("Coefficients for gls()")
+coef_gls
+sebeta
+```
+
+### Try 1: change the optimizer
+
+```{r}
+# Try 1: change the optimizer
+fit_lmer_ctl <- lmer(aval ~ x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore",
+                                           optimizer ="Nelder_Mead"),
+                     data = db_avaiable_ctl)
+```
+
+### Try 2: change the starting values
+
+```{r}
+fit_lmer_ctl <- lmer(aval ~ x1 + x2 + week_ctl + x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore"),
+                     data = db_avaiable_ctl)
+fit_lmer_continue <- lmer(aval ~ x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore"), start = fit_lmer_ctl@theta,
+                     data = db_avaiable_ctl)
+```
+
+### Try 3: ignore grad check
+
+```{r}
+fit_lmer_ctl <- lmer(aval ~ x1 + x2 + week_ctl + x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore", 
+                                           check.conv.grad = "ignore"),
+                     data = db_avaiable_ctl)
+```
+
+### Try 4: increase tolerence of grad check
+
+```{r}
+fit_lmer_ctl <- lmer(aval ~ x1 + x2 + week_ctl + x1:week_ctl + x2:week_ctl + 
+                       (0 + week_ctl|child_ctl),
+                     control = lmerControl(check.nobs.vs.nRE = "ignore", 
+                                           check.conv.grad = .makeCC("warning", tol = 1e-2, relTol = NULL)),
+                     data = db_avaiable_ctl)
+```
+
+

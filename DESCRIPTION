@@ -1,0 +1,38 @@
+Package: mmrm
+Type: Package
+Title: Mixed model repeated measures and its extension
+Version: 0.0.1
+Authors@R: c(
+        person("Siyi", "Liu", email = "sliu48@ncsu.edu", role = c("aut", "cre")),
+        person("Yilong", "Zhang", email = "zhanyilo@merck.com", role = c("aut")) 
+       )
+Description: Mixed model repeated measures and its extension.
+Depends: R (>= 3.6.0)
+License: GPL (>= 3)
+Imports: 
+    stats,
+    mvtnorm,
+    lme4,
+    MCMCpack,
+    Rfit
+Suggests: 
+    devtools,
+    testthat,
+    knitr,
+    rmarkdown,
+    covr,
+    dplyr,
+    reshape2,
+    nlme,
+    e1071,
+    car,
+    Matrix,
+    magic,
+    xtable,
+    MASS
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)  
+Rmarkdwon: echo = TRUE
+RoxygenNote: 7.1.1
+VignetteBuilder: knitr
